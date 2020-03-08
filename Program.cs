@@ -86,6 +86,22 @@ namespace chip8
                     case 0x7000:
                         Register[(opcode & 0x0f00 >> 8)] += (byte)(opcode & 0x00ff);
                         break;
+                    case 0x8000:
+                        int vx = (opcode & 0x0f00) >> 8;
+                        int vy = (opcode & 0x00f0) >> 4;
+                        switch (opcode & 0x000f)
+                        {
+                            case 0: Register[vx] = Register[vy]; break;
+                            case 1: Register[vx] = Register[vx] |= Register[vy]; break;
+                            case 3: Register[vx] = Register[vx] &= Register[vy]; break;
+                            case 4: Register[vx] = Register[vx] ^= Register[vy]; break;
+
+                        }
+                        switch (opcode & 0x0)
+                        {
+
+                        }
+                        break;
                     default:
                         throw new Exception($"Unsupported Opcode {opcode.ToString("X4")}");
                 }
