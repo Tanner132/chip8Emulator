@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -7,6 +7,16 @@
 
   <ItemGroup>
     <None Include="..\.editorconfig" Link=".editorconfig" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="libs\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="SDL2-CS">
+      <HintPath>bin\Debug\netcoreapp3.1\SDL2-CS.dll</HintPath>
+    </Reference>
   </ItemGroup>
 
 </Project>

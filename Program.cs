@@ -1,111 +1,157 @@
-﻿using System;
+﻿using SDL2;
+using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using System.Runtime.InteropServices;
+using System.Threading;
 
-namespace chip8
+namespace Chip8
 {
     class Program
     {
         static void Main(string[] args)
         {
+            if (SDL.SDL_Init(SDL.SDL_INIT_EVERYTHING) < 0)
+            {
+                Console.WriteLine("SDL failed to init.");
+                return;
+            }
+
+            IntPtr window = SDL.SDL_CreateWindow("Chip-8 Interpreter", 128, 128, 64 * 8, 32 * 8, 0);
+
+            if (window == IntPtr.Zero)
+            {
+                Console.WriteLine("SDL could not create a window.");
+                return;
+            }
+
+            IntPtr renderer = SDL.SDL_CreateRenderer(window, -1, SDL.SDL_RendererFlags.SDL_RENDERER_ACCELERATED);
+
+            if (renderer == IntPtr.Zero)
+            {
+                Console.WriteLine("SDL could not create a valid renderer.");
+                return;
+            }
+
             CPU cpu = new CPU();
 
-            using (BinaryReader reader = new BinaryReader(new FileStream("IBM Logo.ch8", FileMode.Open)))
+            using (BinaryReader reader = new BinaryReader(new FileStream("../../spaceInvaders.ch8", FileMode.Open)))
             {
-                while (reader.BaseStream.Position < reader.BaseStream.Length) //looping through file until position is the end
+                List<byte> program = new List<byte>();
+
+                while (reader.BaseStream.Position < reader.BaseStream.Length)
                 {
-                    var opcode = (ushort)((reader.ReadByte() << 8) | reader.ReadByte()); // Setting our opcode variable ensuring it is formatted in big endian
-                    try
+                    program.Add(reader.ReadByte());
+                }
+
+                cpu.LoadProgram(program.ToArray());
+            }
+
+            SDL.SDL_Event sdlEvent;
+            bool running = true;
+
+            int sample = 0;
+            int beepSamples = 0;
+
+            SDL.SDL_AudioSpec audioSpec = new SDL.SDL_AudioSpec();
+            audioSpec.channels = 1;
+            audioSpec.freq = 44100;
+            audioSpec.samples = 256;
+            audioSpec.format = SDL.AUDIO_S8;
+            audioSpec.callback = new SDL.SDL_AudioCallback((userdata, stream, length) =>
+            {
+                if (cpu == null) return;
+
+                sbyte[] waveData = new sbyte[length];
+
+                for (int i = 0; i < waveData.Length && cpu.SoundTimer > 0; i++, beepSamples++)
+                {
+                    if (beepSamples == 730)
                     {
-                        cpu.ExecuteOpCode(opcode);
-                    } 
-                    catch(Exception e)
-                    {
-                        Console.WriteLine(e.Message);
+                        beepSamples = 0;
+                        cpu.SoundTimer--;
                     }
+
+                    waveData[i] = (sbyte)(127 * Math.Sin(sample * Math.PI * 2 * 604.1 / 44100));
+                    sample++;
+                }
+
+                byte[] byteData = (byte[])(Array)waveData;
+
+                Marshal.Copy(byteData, 0, stream, byteData.Length);
+            });
+
+            SDL.SDL_OpenAudio(ref audioSpec, IntPtr.Zero);
+            SDL.SDL_PauseAudio(0);
+
+            IntPtr sdlSurface, sdlTexture = IntPtr.Zero;
+            Stopwatch frameTimer = Stopwatch.StartNew();
+            int ticksPer60hz = (int)(Stopwatch.Frequency * 0.016);
+
+            while (running)
+            {
+                try
+                {
+                    if (!cpu.WaitingForKeyPress) cpu.Step();
+
+                    if (frameTimer.ElapsedTicks > ticksPer60hz)
+                    {
+                        while (SDL.SDL_PollEvent(out sdlEvent) != 0)
+                        {
+                            if (sdlEvent.type == SDL.SDL_EventType.SDL_QUIT)
+                            {
+                                running = false;
+                            }
+                            else if (sdlEvent.type == SDL.SDL_EventType.SDL_KEYDOWN)
+                            {
+                                var key = KeyCodeToKey((int)sdlEvent.key.keysym.sym);
+                                cpu.Keyboard |= (ushort)(1 << key);
+
+                                if (cpu.WaitingForKeyPress) cpu.KeyPressed((byte)key);
+                            }
+                            else if (sdlEvent.type == SDL.SDL_EventType.SDL_KEYUP)
+                            {
+                                var key = KeyCodeToKey((int)sdlEvent.key.keysym.sym);
+                                cpu.Keyboard &= (ushort)~(1 << key);
+                            }
+                        }
+
+                        var displayHandle = GCHandle.Alloc(cpu.Display, GCHandleType.Pinned);
+
+                        if (sdlTexture != IntPtr.Zero) SDL.SDL_DestroyTexture(sdlTexture);
+
+                        sdlSurface = SDL.SDL_CreateRGBSurfaceFrom(displayHandle.AddrOfPinnedObject(), 64, 32, 32, 64 * 4, 0x000000ff, 0x0000ff00, 0x00ff0000, 0xff000000);
+                        sdlTexture = SDL.SDL_CreateTextureFromSurface(renderer, sdlSurface);
+
+                        displayHandle.Free();
+
+                        SDL.SDL_RenderClear(renderer);
+                        SDL.SDL_RenderCopy(renderer, sdlTexture, IntPtr.Zero, IntPtr.Zero);
+                        SDL.SDL_RenderPresent(renderer);
+
+                        frameTimer.Restart();
+                    }
+
+                    Thread.Sleep(1);
+                }
+                catch (Exception e)
+                {
+                    Console.WriteLine(e.Message);
                 }
             }
-            Console.ReadKey();
+
+            SDL.SDL_DestroyRenderer(renderer);
+            SDL.SDL_DestroyWindow(window);
         }
 
-        public class CPU
+        private static int KeyCodeToKey(int keycode)
         {
-            public byte[] RAM = new byte[4096]; //Chip 8 uses 4kb's of ram
-            public byte[] Register = new byte[16];
-            public ushort I = 0;
-            public Stack<ushort> Stack = new Stack<ushort>();
-            public byte DelayTimer;
-            public byte SoundTimer;
-            public byte keyboard;
+            int keyIndex = 0;
+            if (keycode < 58) keyIndex = keycode - 48;
+            else keyIndex = keycode - 87;
 
-            public byte[] Display = new byte[64 * 32];
-
-            public void ExecuteOpCode(ushort opcode)
-            {
-                ushort nibble = (ushort)(opcode & 0xf000); //grabbing the first 4 bytes of the opcode. 
-
-                switch (nibble)
-                {
-                    case 0x0000:
-                        if(opcode == 0x00e0)
-                        {
-                            //If opcode is equal to 00 e0 the we clear display
-                            for (int i = 0; i < Display.Length; i++) Display[i] = 0;
-                        } else if(opcode == 0x00ee)
-                        {
-                            //Opcode for returning a subroutine
-                            I = Stack.Pop();
-                        }
-                        else
-                        {
-                            throw new Exception($"Unsupported Opcode {opcode.ToString("X4")}");
-                        }
-                        break;
-                    case 0x1000:
-                        I = (ushort)(opcode & 0x0fff);
-                        break;
-                    case 0x2000:
-                        Stack.Push(I);
-                        I = (ushort)(opcode & 0x0fff);
-                        break;
-                    case 0x3000:
-                        if (Register[(opcode & 0x0f00 >> 8)] == (opcode & 0x0ff)) I += 2;
-                        break;
-                    case 0x4000:
-                        if (Register[(opcode & 0x0f00 >> 8)] != (opcode & 0x0ff)) I += 2;
-                        break;
-                    case 0x5000:
-                        if (Register[(opcode & 0x0f00 >> 8)] == (Register[opcode & 0x00f0 >> 4])) I += 2;
-                        break;
-                    case 0x6000:
-                        Register[(opcode & 0x0f00 >> 8)] = (byte)(opcode & 0x00ff);
-                        break;
-                    case 0x7000:
-                        Register[(opcode & 0x0f00 >> 8)] += (byte)(opcode & 0x00ff);
-                        break;
-                    case 0x8000:
-                        int vx = (opcode & 0x0f00) >> 8;
-                        int vy = (opcode & 0x00f0) >> 4;
-                        switch (opcode & 0x000f)
-                        {
-                            case 0: Register[vx] = Register[vy]; break;
-                            case 1: Register[vx] = Register[vx] |= Register[vy]; break;
-                            case 3: Register[vx] = Register[vx] &= Register[vy]; break;
-                            case 4: Register[vx] = Register[vx] ^= Register[vy]; break;
-
-                        }
-                        switch (opcode & 0x0)
-                        {
-
-                        }
-                        break;
-                    default:
-                        throw new Exception($"Unsupported Opcode {opcode.ToString("X4")}");
-                }
-            }
+            return keyIndex;
         }
     }
 }
